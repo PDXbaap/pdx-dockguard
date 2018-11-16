@@ -21,23 +21,12 @@ package main
 
 import (
 	"fmt"
-	"os"
-	"syscall"
 	"log"
-	"os/exec"
 	"strings"
-	"time"
-	"bufio"
 	"net/http"
 	"net"
-	"bytes"
 	"io/ioutil"
 )
-
-var lockfile = os.Getenv("PDX_HOME")+"/temp/sandbox.lock"
-var datafile = os.Getenv("PDX_HOME")+"/temp/sandbox.data"
-
-var startedContainers  = make(map[string]string)
 
 func handler(w http.ResponseWriter, r *http.Request) {
 
@@ -55,315 +44,65 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		}
 		cmd = string(body)
 	} else {
-		log.Println("illegitimate http method: ", r.Method)
-		http.Error(w, "illegitimate http method: " + r.Method, http.StatusUnauthorized)
+		log.Println("unsupported http method: ", r.Method)
+		http.Error(w, "unsupported http method: " + r.Method, http.StatusUnauthorized)
 		return
 	}
 
 	log.Println("received cmd: " + cmd)
 
-	args := strings.Split(cmd," ")
+	args := strings.Fields(cmd)
 
-	if !accessControl(args) {
-		log.Println("unauthorized priviledged access")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	ok, reason, name := accessControl(args);
+
+	if !ok {
+		log.Println("unauthorized:", reason)
+		http.Error(w, "unauthorized: " + reason, http.StatusUnauthorized)
 		return
 	}
 
-	// get name of container to be created
-
-	if args[1] == "run" {
-
-		var name string = ""
-
-		for _, v := range args[2:] {
-			if strings.HasPrefix(v, "--name") {
-				name = strings.Split(v, "=")[1]
-				break
-			}
-		}
-
-		if name == "" {
-			log.Println("missing container name, existing ...")
-			http.Error(w, "missing container name", http.StatusBadRequest)
-			return
-		}
-
-		cleanup()
-
-		startedContainers[name] = name
-
-		saveStarted()
-
-		log.Println("starting container: ", name)
-
-	}
-
-	exe := exec.Command(args[0], args[1:]...)
-
-	var out bytes.Buffer
-	exe.Stdout = &out
-	exe.Stderr = &out
-	err := exe.Run()
-
-	if err != nil {
-		log.Println("cmd exec error: ", err.Error(), out.String())
-		http.Error(w, out.String(), http.StatusBadRequest)
+	if name == "" {
+		log.Println("missing container name, noop")
+		http.Error(w, "missing container name", http.StatusBadRequest)
 		return
 	}
 
-	fmt.Println(w, out.String())
+	saveStartedContainers(name)
+
+	log.Println("starting container: ", name)
+
+	exitcode, output := execute(args)
+
+	w.Header().Set("DOCKER_EXIT_CODE", exitcode)
+
+	if exitcode != "0" {
+		http.Error(w, output, http.StatusBadRequest)
+	} else {
+		log.Println("started container:", name)
+		fmt.Println(w, output)
+	}
 
 	return
 }
 
-
 func main() {
 
-	var lockF *os.File
-	var err error
-	for {
-		lockF, err = os.OpenFile(lockfile, os.O_CREATE, os.ModePerm)
+	lock()
 
-		err = syscall.Flock(int(lockF.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-
-		if err == syscall.EWOULDBLOCK {
-			log.Println("another instance running, waiting")
-			time.Sleep(100 * time.Millisecond)
-			continue
-		}
-
-		break
-	}
-
-	defer func() {
-		syscall.Flock(int(lockF.Fd()), syscall.LOCK_UN)
-		lockF.Close()
-	}()
-
-	log.Println("now only myself is running")
-
-	loadStarted()
-
+	defer unlock()
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 
 	if err != nil {
-		panic(err)
+		log.Fatalln(err)
 	}
 
 	log.Printf("listening on: %s", listener.Addr().String())
 
+	save(listener.Addr().String())
+
 	http.HandleFunc("/", handler)
 
-	log.Fatal(http.Serve(listener, nil))
+	log.Fatalln(http.Serve(listener, nil))
 }
 
-
-func accessControl(args []string) bool {
-
-	////////////////////////////////////////////////////////
-	//
-	// IMPORTANT: sandbox whitelist rules
-	//
-	// 1) Only allow docker run/stop/stats
-	//
-	// 2) docker run [OPTIONS] IMAGE [COMMAND] [ARG...]
-	//
-	//		unprivileged no-harm options only
-	//
-	// 3) docker stop [OPTIONS] CONTAINER [CONTAINER...]
-	//
-	// 		only containers started by sandbox
-	//
-	// 4) docker stats [OPTIONS] [CONTAINER...]
-	//
-	//		only containers started by sandbox
-	//
-	//
-	// A docker option-with-arg must be in --key=val or -k=val format
-	//
-    //////////////////////////////////////////////////////
-
-	// only do docker, nothing else
-
-	if args[0] != "docker" {
-		log.Println("not a docker binary")
-		return false
-	}
-
-	// only stats what we have started
-
-	if args[1] == "stats" {
-
-		for _, v := range args[2:] {
-
-			if strings.HasPrefix(v, "-") {
-				continue
-			}
-
-			if _, ok := startedContainers[v]; !ok {
-				log.Println("not a sandboxed container: " + v)
-				return false
-			}
-		}
-
-		return true
-	}
-
-	// only stop what we have started
-
-	if args[1] == "stop" {
-
-		for _, v := range args[2:] {
-
-			if strings.HasPrefix(v, "-") {
-				continue
-			}
-
-			if _, ok := startedContainers[v]; !ok {
-				log.Println("not a sandboxed container: " + v)
-				return false
-			}
-		}
-
-		return true
-	}
-
-	if args[1] != "run" {
-		log.Println("not docker run/stop/stats")
-		return false
-	}
-
-	// Check docker run [OPTIONS] IMAGE [COMMAND] [ARG...]
-
-	for _,v := range args[2:] {
-
-		if strings.HasPrefix(v,"--privileged") {
-			if !strings.Contains(v,"=false") {
-				log.Println("unauthorized option: " + v)
-				return false
-			}
-		}
-
-		if strings.HasPrefix(v, "--cap-add") {
-			log.Println("unauthorized option: " + v)
-			return false
-		}
-
-		if strings.HasPrefix(v,"--device") {
-			log.Println("unauthorized option: " + v)
-			return false
-		}
-
-		if strings.HasPrefix(v, "--group-add") {
-			log.Println("unauthorized option: " + v)
-			return false
-		}
-
-		if strings.HasPrefix(v,"--ipc") {
-			if strings.Contains(v, "host") || strings.Contains(v, "shareable") ||
-				strings.Contains(v, "container:") {
-				log.Println("unauthorized ipc mechanism: " + v)
-				return false
-			}
-		}
-
-		if strings.HasPrefix(v, "--security-opt")  {
-			if !strings.Contains(v, "no-new-privileges") {
-				log.Println("unauthorized security option: " + v)
-				return false
-			}
-		}
-
-		if strings.HasPrefix(v, "-v") || strings.HasPrefix(v, "--volume") {
-			if !strings.Contains(v,"ro") {
-				log.Println("volume must be read-only: " + v)
-				return false;
-			}
-		}
-
-		if !strings.HasPrefix(v, "-") { //docker image now
-
-			if strings.HasPrefix(v, "pdxbaap/pdx-sandbox") || strings.HasPrefix(v, "pdx-sandbox") ||
-				strings.HasPrefix(v, "pdxbaap/pdx-chainstack") || strings.HasPrefix(v, "pdx-chainstack") ||
-				strings.HasPrefix(v, "pdxbaap/pdx-blockchain") || strings.HasPrefix(v, "pdx-blockchain") {
-				return true
-			} else {
-				log.Println("malformed option or unauthorized image: " + v)
-				return false
-			}
-		}
-	}
-
-	return false
-}
-
-func cleanup() {
-
-	// remove dead container ids off the record
-
-	for _, v := range startedContainers {
-
-		//docker inspect -f '{{.State.Running}}' v
-
-		out, err := exec.Command("docker", "-f", "{{.State.Running}}", v).CombinedOutput()
-
-		if err != nil {
-			delete(startedContainers, v)
-			log.Println("inspect error:", err)
-			log.Println("cleanup dead container: ", v)
-			continue
-		}
-
-		if string(out) != "true" {
-			delete(startedContainers, v)
-			log.Println("cleanup dead container: ", v)
-		}
-	}
-
-	log.Println("cleanup done ")
-}
-
-func loadStarted() {
-
-	file, err := os.OpenFile(datafile, os.O_RDONLY, os.ModePerm)
-	if err != nil {
-		log.Println("cannot read data file: ", err)
-		return
-	}
-	defer file.Close()
-
-	scanner := bufio.NewScanner(file)
-
-	for scanner.Scan() {
-		text := scanner.Text()
-		log.Println("found started container: " + text)
-		startedContainers[text] = text
-	}
-
-	if err := scanner.Err(); err != nil {
-		log.Println(err)
-	}
-}
-
-func saveStarted() {
-
-	os.Remove(datafile)
-
-	file, err := os.Create(datafile)
-	if err != nil {
-		log.Println("cannot write data file: ", err)
-		return
-	}
-	defer file.Close()
-
-	writer := bufio.NewWriter(file)
-
-	for _, v := range startedContainers {
-		log.Println("save started container:" + v)
-		fmt.Fprintln(writer, v)
-	}
-
-	writer.Flush()
-}

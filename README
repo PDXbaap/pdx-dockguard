@@ -1,2 +1,23 @@
-curl -d "docker run -t --rm --memory=100m --cpus=0.1 -v=$PDX_HOME/dapps:/dapps/:ro --name=xzzz pdx-sandbox /bin/sh" -X POST http://localhost:41351
+- Testing 
+  
+  Do NOT use -it, -i or it. 
 
+  curl -d "docker run --rm --memory=100m --cpus=0.1 -v=$PDX_HOME/dapps:/dapps/:ro --name=xzzz pdx-sandbox /bin/sh" -X POST http://localhost:41351
+
+- Create self-signed certificate 
+
+  openssl ecparam -genkey -name secp256k1 -out signer.key
+  openssl req -new -sha256 -key signer.key -out signer.csr
+
+	Country Name (2 letter code) [AU]:US
+	State or Province Name (full name) [Some-State]:California
+	Locality Name (eg, city) []:San Jose
+	Organization Name (eg, company) [Internet Widgits Pty Ltd]:PDX Technologies, Inc.
+	Organizational Unit Name (eg, section) []:Blockchain Hypercloud
+	Common Name (e.g. server FQDN or YOUR name) []:signer.pdx.link
+	Email Address []:jz@pdx.ltd
+
+  openssl req -x509 -sha256 -days 3650 -key signer.key -in signer.csr -out signer.crt
+
+- Sign & verify, see the img-signer/verify.sh for details
+ 

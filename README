@@ -20,4 +20,10 @@
   openssl req -x509 -sha256 -days 3650 -key signer.key -in signer.csr -out signer.crt
 
 - Sign & verify, see the img-signer/verify.sh for details
- 
+
+  ./img-signer.sh ./signer.key /home/jz/pdx-home/bin/images/pdx-chainstack-1.0.0.tgz /home/jz/pdx-home/bin/images/pdx-chainstack-1.0.0.tgz.sig
+
+  ./img-verify.sh ./signer.crt /home/jz/pdx-home/bin/images/pdx-appsandbox-1.0.0.tgz /home/jz/pdx-home/bin/images/pdx-appsandbox-1.0.0.tgz.sig 
+Verified OK
+
+  ./img-loader.sh ./signer.crt $PDX_HOME/bin/images 
